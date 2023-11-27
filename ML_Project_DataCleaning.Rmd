@@ -1,0 +1,379 @@
+---
+title: "ML_Project_DataCleaning"
+author: "Siwei Wu"
+date: "2023/3/3"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+set working directory and load packages
+```{r}
+# set up working directory
+rm(list=ls())
+path <- dirname(rstudioapi::getActiveDocumentContext()$path)
+setwd(path)
+rm(path)
+
+# load packages
+library(tidyverse)
+library(dplyr)
+library(RColorBrewer)
+library(mice)
+library(groupdata2)
+
+```
+
+## Functions for data cleaning
+Function to Check NAs of each column in a dataframe
+```{r}
+# Check NAs
+NA_count_fun = function(df){
+  NA_count = sapply(df, function(x){sum(is.na(x))})
+  NA_count = as.data.frame(NA_count)
+  # NA_count = NA_count %>% filter(NA_count > 0)
+  return(NA_count)
+}
+
+```
+
+Function to Check NAs of each column of cases in a dataframe
+```{r}
+# Function to check NAs in cases
+# df is the subset of the data with femalecancer_incident_case as the last column
+NAInCases_count_fun = function(df){
+  df = df %>% filter(femalecancer_incident_case==1)
+  NA_in_cases = NA_count_fun(df)
+  return(NA_in_cases)
+}
+```
+
+Load in UKB data
+```{r}
+# read in data of exposure
+ukb_cate = readRDS("./extraction_and_recoding/outputs/ukb_recoded_cate.rds")
+ukb_numeric = readRDS("extraction_and_recoding/outputs/ukb_extracted_num.rds")
+```
+
+Deal with abnormal values in numeric variables
+```{r}
+# Check numeric variables with abnormal values(negative numbers for numeric variables)
+abnormal_value = sapply(ukb_numeric, function(x){sum(ifelse(x<0, 1, 0), na.rm=TRUE)})
+abnormal_value = as.data.frame(abnormal_value)
+abnormal_value <- abnormal_value %>% filter (abnormal_value > 0)
+
+# replace abnormal values with number or NA
+  # -10 represents "Less than one"; -1 represents "Do not know"; -3 represents "Prefer not to answer"; -4 represents "Do not remember"
+  # Substitute 0 to -10, NA to -1, -3 and -4
+ukb_numeric[ukb_numeric==-10] = 0
+ukb_numeric[ukb_numeric==-1] = NA
+ukb_numeric[ukb_numeric==-3] = NA
+ukb_numeric[ukb_numeric==-4] = NA
+```
+
+Deal with non-informative values in dataframe
+```{r}
+# set all "Do not know" and "Prefer not to answer" to NA
+ukb_cate = ukb_cate %>% mutate_all(as.character)
+ukb_cate[ukb_cate == "Do not know"] = NA
+ukb_cate[ukb_cate == "Prefer not to answer"] = NA
+```
+
+Merge numeric data and categorical data
+```{r}
+ukb_cate["eid"] <- rownames(ukb_cate)
+ukb_numeric["eid"] <- rownames(ukb_numeric)
+ukb = inner_join(ukb_cate, ukb_numeric)
+
+# Remove unuseful data
+rm(abnormal_value)
+rm(ukb_cate, ukb_numeric)
+```
+
+Merge the table of features with the table of outcome
+```{r}
+# Read in data of diabetes
+T2DM <- readRDS("./outcome_definition/Outputs_T2DM/output_final.rds")
+colnames(T2DM)<-c("eid", "T2DM_date_recr", "T2DM_diagnosis", "T2DM_date_death", "T2DM_case", "T2DM_prevalent_case", "T2DM_incident_case", "T2DM_time_to_diagnosis")
+
+DM <- readRDS("./outcome_definition/Outputs_DM/output_final.rds")
+colnames(DM)<-c("eid", "DM_date_recr", "DM_diagnosis", "DM_date_death", "DM_case", "DM_prevalent_case", "DM_incident_case", "DM_time_to_diagnosis")
+
+HTN <- readRDS("./outcome_definition/Outputs_HTN/output_final.rds")
+colnames(HTN)<-c("eid", "HTN_date_recr", "HTN_diagnosis", "HTN_date_death", "HTN_case", "HTN_prevalent_case", "HTN_incident_case", "HTN_time_to_diagnosis")
+
+Dyslipid <- readRDS("./outcome_definition/Outputs_Dyslipid/output_final.rds")
+colnames(Dyslipid)<-c("eid", "Dyslipid_date_recr", "Dyslipid_diagnosis", "Dyslipid_date_death", "Dyslipid_case", "Dyslipid_prevalent_case", "Dyslipid_incident_case", "Dyslipid_time_to_diagnosis")
+
+
+ukb <- inner_join(ukb, (T2DM  %>% select(eid, T2DM_prevalent_case, T2DM_incident_case)))
+ukb <- inner_join(ukb, (DM  %>% select(eid, DM_prevalent_case, DM_incident_case)))
+
+ukb <- inner_join(ukb, (HTN  %>% select(eid, HTN_prevalent_case)))
+ukb <- inner_join(ukb, (Dyslipid %>% select(eid, Dyslipid_prevalent_case)))
+
+rm(T2DM, DM, HTN, Dyslipid)
+
+```
+
+Cohort construction
+```{r}
+# Remove prevalent cases (diagnosed before enrollment)
+ukb <- ukb %>% filter(DM_prevalent_case == 0) # remove prevalent cases
+ukb <- ukb %>% select(-DM_prevalent_case, -T2DM_prevalent_case)
+table(ukb$DM_incident_case) # 32252 Incident DM diabetes
+table(ukb$T2DM_incident_case) #30539 Incident T2DM diabetes
+
+# Remove fasting glucose > 7, HbA1c >= 42mmol/mol
+ukb = ukb %>% filter(Bio_glucose.0.0<7)
+ukb = ukb %>% filter(Bio_glycated_haemoglobin.0.0<42)
+
+# Remove non-white people
+ukb <- ukb %>% filter(Demo_Race.0.0=="British"|Demo_Race.0.0=="Irish"|Demo_Race.0.0=="Any other white background"|Demo_Race.0.0=="White") # only keep white people
+ukb = ukb %>% select(-Demo_Race.0.0)
+```
+
+
+## Data Cleaning
+Clean family history illness data
+```{r}
+# Illness_mother
+ukb = ukb[!is.na(ukb$illness_mother.0.0),] # Exclude NAs
+ukb_illness_mother = ukb %>% select(starts_with("illness_mother"))
+ukb["Fam_Mother_DM"] = apply(ukb_illness_mother, MARGIN = 1, FUN= function(x) all("Diabetes" %in% x))
+ukb = ukb %>% select(-colnames(ukb_illness_mother))
+
+# Illness_father
+ukb = ukb[!is.na(ukb$illness_father.0.0),] # Exclude NAs
+ukb_illness_father = ukb %>% select(starts_with("illness_father"))
+ukb["Fam_Father_DM"] = apply(ukb_illness_father, MARGIN = 1, FUN= function(x) all("Diabetes" %in% x))
+ukb = ukb %>% select(-colnames(ukb_illness_father))
+
+# Illness_siblings.0.0: we won't use siblings' diabetes history, so don't clean this variable
+# ukb = ukb[!is.na(ukb$illness_siblings.0.0),] # Exclude NAs
+# ukb_illness_siblings = ukb %>% select(starts_with("illness_siblings"))
+# ukb["Fam_siblings_DM"] = apply(ukb_illness_siblings, MARGIN = 1, FUN= function(x) all("Diabetes" %in% x))
+# ukb = ukb %>% select(-colnames(ukb_illness_siblings))
+
+# Remove redundant 
+rm(ukb_illness_father, ukb_illness_mother)
+```
+
+Clean lifestyle data
+```{r}
+# Factor 
+ukb$Life_Alcohol_freq.0.0 = factor(ukb$Life_Alcohol_freq.0.0, levels=c("Never", "Special occasions only", "Once or twice a week", "One to three times a month", "Three or four times a week", "Daily or almost daily"))
+ukb$Life_Curr_Smoking.0.0 = factor(ukb$Life_Curr_Smoking.0.0 , levels=c( "No", "Only occasionally", "Yes, on most or all days"))
+
+# Remove redundant smoking and alcohol variables
+ukb = ukb %>% select(-c("Life_smok_status.0.0", "Life_Alcohol_status.0.0", "Life_ever_smoked.0.0"))
+rm(ukb_life, NA_count_ukb_life)
+```
+
+Clean biochemical and urine variables
+```{r}
+# Biochemistry and urine variables: Clean the column of Urine_microalbumin
+# Urine_microalbumin < 6.7 is flagged, set people with Urine_microalbumin < 6.7 to be 6.7 in their Urine_microalbumin
+ukb = ukb %>% mutate(Urine_microalbumin.0.0 = ifelse(is.na(Urine_microalbumin_flag.0.0), Urine_microalbumin.0.0, 6.7)) %>% select(-Urine_microalbumin_flag.0.0)
+
+# Remove Oestradiol and Rheumatoid
+ukb = ukb %>% select(-c("Bio_Oestradiol.0.0", "Bio_Rheumatoid factor.0.0"))
+```
+
+Clean physical measurement variables
+```{r}
+# Check NAs in physical measurement variables 
+ukb_PhyMeas = ukb %>% select(starts_with("phyMeas_"))
+NA_count_ukb_PhyMeas = NA_count_fun(ukb_PhyMeas)
+# table(ukb_PhyMeas$femalecancer_incident_case) # 12536 cases
+
+# Clean blood pressure: Fill in NAs in auto-read blood pressure with the one manually measured
+ukb = ukb %>% mutate(phyMeas_SBP = ifelse(is.na(PhyMeas_SBP_auto.0.0), PhyMeas_SBP_manual.0.0, PhyMeas_SBP_auto.0.0))
+ukb = ukb %>% mutate(phyMeas_DBP = ifelse(is.na(PhyMeas_DBP_auto.0.0), PhyMeas_DBP_manual.0.0, PhyMeas_DBP_auto.0.0))
+ukb = ukb %>% select(-c("PhyMeas_SBP_manual.0.0", "PhyMeas_SBP_manual.0.1", "PhyMeas_DBP_manual.0.0", "PhyMeas_DBP_manual.0.1", "PhyMeas_DBP_auto.0.0", "PhyMeas_DBP_auto.0.1", "PhyMeas_SBP_auto.0.0","PhyMeas_SBP_auto.0.1"))
+
+
+# Drop observations with NAs in physical measurement variables
+# ukb_PhyMeas = ukb %>% select(starts_with("phyMeas_"))
+# ukb = ukb[complete.cases(ukb_PhyMeas),]
+rm(ukb_PhyMeas, NA_count_ukb_PhyMeas, Unknown_count_ukb_PhyMeas)
+
+```
+
+Clean diet data
+```{r}
+# str(ukb_ML)
+# lapply(ukb_ML %>% select(starts_with("diet")), table)
+
+# Factor ordinal diet data
+for(diet in c("Diet_oil_fish_intake.0.0", "Diet_non_oil_fish_intake.0.0", "Diet_proc_meat_intake.0.0", "Diet_poultry_intake.0.0", "Diet_beef_intake.0.0", "Diet_mutton_intake.0.0", "Diet_pork_intake.0.0")){ukb[,diet] = factor(ukb[,diet], levels=c("Never", "Less than once a week", "Once a week", "2-4 times a week", "5-6 times a week", "Once or more daily"))}
+
+# Factor ordinal diet data: Diet_added_salt.0.0
+ukb$Diet_added_salt.0.0  = factor(ukb$Diet_added_salt.0.0 , levels=c("Never/rarely","Sometimes", "Usually", "Always"))
+```
+
+Remove columns with too many NAs(more then 50%)
+```{r}
+ukb = ukb %>% select(-starts_with("Nutrient_"))
+ukb = ukb %>% select(-starts_with("Med_Treat"))
+ukb = ukb %>% select(-starts_with("Meta_"))
+ukb = ukb %>% select(-starts_with("illness_siblings"))
+ukb = ukb %>% select(-starts_with("Diet_"))
+ukb = ukb %>% select(-T2DM_incident_case)
+```
+
+Keep complete cases
+```{r}
+ukb_ml = ukb[complete.cases(ukb),]
+table(ukb_ml$DM_incident_case)
+```
+
+Factor variables
+```{r}
+# Select factor variables and 
+ukb_ml_factor= ukb %>% select(eid, where(is.factor))
+
+# Transform factors into ordinal variables
+ukb_ml_ordinal = as.data.frame(lapply(ukb_ml_factor, as.numeric))
+ukb_ml_ordinal$eid = as.character(ukb_ml_ordinal$eid)
+  
+# Select non factor variables
+ukb_ml_nonfactor = ukb_ml %>% select(-is.factor)
+# One hot code "Demo_Sex.0.0", "DM_incident_case", "HTN_prevalent_case", "Dyslipid_prevalent_case", "Fam_Mother_DM", "Fam_Father_DM"   
+# ukb_ml_nonfactor$Fam_Mother_DM = as.factor(as.numeric(ukb_ml_nonfactor$Fam_Mother_DM))
+# ukb_ml_nonfactor$Fam_Father_DM = as.factor(as.numeric(ukb_ml_nonfactor$Fam_Father_DM))
+ukb_ml_nonfactor$Fam_Mother_DM = as.numeric(ukb_ml_nonfactor$Fam_Mother_DM)
+ukb_ml_nonfactor$Fam_Father_DM = as.numeric(ukb_ml_nonfactor$Fam_Father_DM)
+# ukb_ml_nonfactor$HTN_prevalent_case = as.factor(ukb_ml_nonfactor$HTN_prevalent_case)
+# ukb_ml_nonfactor$Dyslipid_prevalent_case = as.factor(ukb_ml_nonfactor$Dyslipid_prevalent_case )
+ukb_ml_nonfactor$Demo_Sex.0.0 = ifelse(ukb_ml_nonfactor$Demo_Sex.0.0 == "Female", 0, 1)
+# ukb_ml_nonfactor$Demo_Sex.0.0 = factor(ukb_ml_nonfactor$Demo_Sex.0.0, levels=c(0,1))
+
+# Merge
+ukb_ml = inner_join(ukb_ml_nonfactor, ukb_ml_ordinal, by="eid")
+rm(ukb_ml_factor, ukb_ml_ordinal, ukb_ml_nonfactor)
+```
+
+Select data for predicting
+```{r}
+# ukb_ML = ukb %>% select(eid, Demo_Sex.0.0, Demo_Age_enrollment.0.0, PhyMeas_waist_cir.0.0, PhyMeas_BMI.0.0, Fam_Par_DM, Bio_hdl_cholesterol.0.0, Bio_triglycerides.0.0, starts_with("Diet_"), HTN_prevalent_case, Dyslipid_prevalent_case, DM_incident_case)
+# ukb_ML = ukb_ML[complete.cases(ukb_ML),]
+# ukb_ML_NA_count = NA_count_fun(ukb_ML)
+# table(ukb_ML$DM_incident_case)
+
+
+## Rearrange the variables
+sex_horm = c("Bio_shbg.0.0","Bio_testosterone.0.0")
+Inflam = c("Bio_c_reac_protein.0.0")
+glucose = c("Bio_glucose.0.0", "Bio_glycated_haemoglobin.0.0", "Bio_igf_1.0.0")
+liver = c("Bio_alkaline_phosphate.0.0", "Bio_alanine_aminotransferase.0.0", "Bio_aspartate_aminotransferase.0.0", "Bio_direct_bilirubin.0.0", "Bio_gamma_glutamyltransferase.0.0", "Bio_total_bilirubin.0.0")
+lipid = c("Bio_apolipoprotein_a.0.0", "Bio_apolipoprotein_b.0.0", "Bio_cholesterol.0.0", "Bio_hdl_cholesterol.0.0", "Bio_ldl_direct.0.0", "Bio_lipoprotein_a.0.0", "Bio_triglycerides.0.0")
+nutrit = c("Bio_albumin.0.0", "Bio_total_protein.0.0")
+skeleton = c("Bio_calcium.0.0", "Bio_phosphate.0.0", "Bio_vitamin_d.0.0")
+kidney = c("Bio_urea.0.0", "Bio_creatinine.0.0", "Bio_cystatin_c.0.0")
+PhyMeas = c("phyMeas_SBP", "phyMeas_DBP", "PhyMeas_waist_cir.0.0", "PhyMeas_BMI.0.0")
+life = c( "Life_Days_WK_PhyAc.0.0", "Life_Curr_Smoking.0.0", "Life_Alcohol_freq.0.0")
+
+ukb_ml = ukb_ml %>% select(eid, starts_with("Demo_"), PhyMeas, life, sex_horm, Inflam, glucose, liver, lipid, nutrit, skeleton, Bio_urate.0.0, kidney, starts_with("Urine_"), HTN_prevalent_case, Dyslipid_prevalent_case, Fam_Mother_DM, Fam_Father_DM, DM_incident_case)
+
+rm(PhyMeas, life, sex_horm, Inflam, glucose, liver, lipid, nutrit, skeleton, kidney)
+table(ukb_ml$DM_incident_case)
+```
+
+
+```{r}
+colnames(ukb_ml) = c("eid", "Sex", "Age", "SBP", "DBP", "Waist_Cir", "BMI", "Phy_Activity", "Smoking", "Alcohol", 
+  "shbg", "Testosterone", "CRP", "Glucose", "HbA1c", "IGF1", "ALP", "ALT", "AST", 
+  "Direct_bilirubin", "GGT", "Total_bilirubin", "ApoA", "ApoB", 
+  "Cholesterol", "HDLC", "LDLC", "Lipoprotein_A", "Triglycerides", 
+  "Albumin", "Total_protein", "Calcium", "Phosphate", "Vitamin_D", 
+  "urate", "Urea", "Creatinine", "Cystatin_C", 
+  "Urine_Microalbumin", "Urine_Creatine", "Urine_Potassium", "Urine_Sodium",
+  "HTN", "Dyslipid", "DM_Mother", "DM_Father", "DM")
+```
+
+
+
+## Data preparation
+Split test set and training set 
+```{r}
+set.seed(123)
+rownames(ukb_ml)=ukb_ml$eid
+ukb_ml = ukb_ml %>% select(-eid)
+train_test_split=createDataPartition(ukb_ml$DM, p = .75, list = FALSE, times = 1)
+ukb_ml_train=ukb_ml[train_test_split, ]
+ukb_ml_test=ukb_ml[-train_test_split, ]
+rm(train_test_split)
+table(ukb_ml_train$DM_incident_case)
+table(ukb_ml_test$DM_incident_case)
+```
+
+Down-sample control to a case:control = 1:5
+```{r}
+# plot(density(ukb_ml$Age))
+# lines(ukb_ml$Age)
+# Most of our obsevations are between 40 - 70 years old
+# The prevalence of diabetes between 45 - 75 ranges from 10% - 17%
+# https://assets.publishing.service.gov.uk/government/uploads/system/uploads/attachment_data/file/612306/Diabetesprevalencemodelbriefing.pdf
+
+# keep case: control to be 1:5, so that the ration of case and control assimilate the real world one
+
+ratio = 5 # ratio = case: control
+## down-sample ukb_ml_train
+ids_case = which(ukb_ml_train$DM == 1)
+ids_control = which(ukb_ml_train$DM == 0)
+set.seed(100)
+ids_control_downsample = sample(ids_control, ratio*length(ids_case))
+ukb_ml_train = ukb_ml_train[sort(c(ids_case, ids_control_downsample)),]
+table(ukb_ml_train$DM)
+
+## down-sample ukb_ml_test 
+# ids_case = which(ukb_ml_test$DM_incident_case == 1)
+# ids_control = which(ukb_ml_test$DM_incident_case == 0)
+# set.seed(100)
+# ids_control_downsample = sample(ids_control, ratio*length(ids_case))
+# ukb_ml_test = ukb_ml_test[sort(c(ids_case, ids_control_downsample)),]
+# table(ukb_ml_test$DM_incident_case)
+```
+
+Scaled version
+```{r}
+X_train = ukb_ml_train %>% select(-DM) 
+X_train = as.matrix(X_train)
+X_train = scale(X_train, center=TRUE, scale=TRUE)
+print(all(rownames(X_train)==rownames(ukb_ml_train)))
+ukb_ml_train_scale = cbind(X_train, ukb_ml_train %>% select(DM))
+rm(X_train)
+
+
+X_test = ukb_ml_test %>% select(-DM)
+X_test = as.matrix(X_test)
+X_test = scale(X_test, center=TRUE, scale=TRUE)
+print(all(rownames(X_test)==rownames(ukb_ml_test)))
+ukb_ml_test_scale = cbind(X_test, ukb_ml_test %>% select(DM))
+
+write.csv(ukb_ml_train_scale, "ML_train_scale.csv", row.names=FALSE)
+write.csv(ukb_ml_test_scale, "ML_test_scale.csv", row.names=FALSE)
+```
+Un-scaled version(Binary variables are factors, but csv will not memorize the data type of factor; therefore need to re-factor when analyzing)
+```{r}
+# ukb_ml_train$Demo_Sex.0.0 = factor(ukb_ml_train$Demo_Sex.0.0)
+# ukb_ml_train$HTN_prevalent_case = factor(ukb_ml_train$HTN_prevalent_case)
+# ukb_ml_train$Dyslipid_prevalent_case = factor(ukb_ml_train$Dyslipid_prevalent_case)
+# ukb_ml_train$Fam_Mother_DM = factor(ukb_ml_train$Fam_Mother_DM)
+# ukb_ml_train$Fam_Father_DM = factor(ukb_ml_train$Fam_Father_DM)
+# ukb_ml_train$DM_incident_case = factor(ukb_ml_train$DM_incident_case)
+# 
+# ukb_ml_test$Demo_Sex.0.0 = factor(ukb_ml_test$Demo_Sex.0.0)
+# ukb_ml_test$HTN_prevalent_case = factor(ukb_ml_test$HTN_prevalent_case)
+# ukb_ml_test$Dyslipid_prevalent_case = factor(ukb_ml_test$Dyslipid_prevalent_case)
+# ukb_ml_test$Fam_Mother_DM = factor(ukb_ml_test$Fam_Mother_DM)
+# ukb_ml_test$Fam_Father_DM = factor(ukb_ml_test$Fam_Father_DM)
+# ukb_ml_test$DM_incident_case = factor(ukb_ml_test$DM_incident_case)
+
+write.csv(ukb_ml_train, "ML_train.csv", row.names=FALSE)
+write.csv(ukb_ml_test, "ML_test.csv", row.names=FALSE)
+```
+
